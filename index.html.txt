@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Subway Surfer - Hard Mode</title>
+    <style>
+        body { margin: 0; background: #222; overflow: hidden; font-family: 'Arial Black', sans-serif; display: flex; justify-content: center; touch-action: none; }
+        canvas { background: #4e7a3a; border-left: 10px solid #333; border-right: 10px solid #333; max-width: 100vw; height: 100vh; }
+        .ui-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: rgba(0,0,0,0.8); z-index: 10; }
+        .stats { position: absolute; top: 20px; right: 20px; color: #fff; text-shadow: 2px 2px #000; font-size: 18px; text-align: right; pointer-events: none; }
+        button { padding: 15px 40px; font-size: 22px; font-family: 'Arial Black'; background: #ffcc00; border: none; cursor: pointer; border-radius: 10px; margin: 10px; }
+        #pauseBtn { position: absolute; top: 20px; left: 20px; width: 50px; height: 50px; font-size: 25px; z-index: 5; display: none; background: #ffcc00; border-radius: 50%; border: none; }
+    </style>
+</head>
+<body>
+
+    <div id="startScreen" class="ui-overlay">
+        <h1 style="color: #ffcc00; font-size: 40px; text-align: center;">AI SUBWAY<br>PRO RUN</h1>
+        <button onclick="startGame()">START</button>
+        <p style="color: white; font-size: 14px;">Vorsicht: Es wird schnell!</p>
+    </div>
+
+    <button id="pauseBtn" onclick="togglePause()">⏸</button>
+    <div class="stats">
+        SCORE: <span id="score">0</span><br>
+        COINS: <span id="coins">0</span>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const startScreen = document.getElementById('startScreen');
+    const pauseBtn = document.getElementById('pauseBtn');
+
+    canvas.width = 500;
+    canvas.height = window.innerHeight;
+
+    let score, coins, gameSpeed, isGameOver, isPaused, currentLane, trains, coinPickups, scenery, isSliding, slideTimer, isOnTrain;
+    let spawnTimer = 0;
+    const lanes = [150, 250, 350];
+    const player = { x: lanes[1], y: canvas.height - 120, skin: '#ffe0bd', shirt: '#ff4444' };
+
+    // --- AUDIO SYSTEM (LEISER & RHYTHMISCH) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    let musicInterval = null;
+    let step = 0;
+
+    function playNote(freq, type, vol, duration) {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        // Lautstärken sind jetzt deutlich niedriger (vol * 0.5 oder weniger)
+        gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(); osc.stop(audioCtx.currentTime + duration);
+    }
+
+    function startBeat() {
+        if (musicInterval) clearInterval(musicInterval);
+        step = 0;
+        musicInterval = setInterval(() => {
+            if (isGameOver || isPaused) return;
+
+            // Bass (Sehr leise)
+            if (step % 2 === 0) {
+                playNote(step % 8 === 0 ? 110 : 82, 'triangle', 0.05, 0.2); 
+            }
+
+            // Hi-Hat (Dezent)
+            if (step % 2 === 1) {
+                playNote(1500, 'square', 0.005, 0.03);
+            }
+
+            // Melodie (Dezent im Hintergrund)
+            const melody = [440, 0, 440, 523, 0, 392, 0, 349];
+            if (melody[step % 8] !== 0) {
+                playNote(melody[step % 8], 'sine', 0.02, 0.2);
+            }
+
+            step++;
+        }, 200);
+    }
+
+    function playCoinSound() { playNote(1500, 'sine', 0.03, 0.1); } // Münze ist jetzt sehr leise
+    function playDeathSound() { playNote(100, 'sawtooth', 0.1, 0.5); }
+
+    // --- GAME LOGIC ---
+    function initVariables() {
+        score = 0; coins = 0; gameSpeed = 7;
+        isGameOver = false; isPaused = false;
+        currentLane = 1; trains = []; coinPickups = []; scenery = [];
+        isSliding = false; slideTimer = 0; isOnTrain = false;
+        spawnTimer = 0;
+        player.x = lanes[1];
+    }
+
+    function startGame() {
+        audioCtx.resume();
+        initVariables();
+        startScreen.style.display = 'none';
+        pauseBtn.style.display = 'block';
+        startBeat();
+        requestAnimationFrame(gameLoop);
+    }
+
+    function update() {
+        score++;
+        
+        // SCHWIERIGKEITS-LEVEL: Speed erhöht sich alle 500 Punkte
+        if (score % 500 === 0) gameSpeed += 0.3;
+
+        // SPWAN LOGIK: Zeitabstand zwischen Hindernissen wird geringer
+        spawnTimer--;
+        if (spawnTimer <= 0) {
+            const lane = Math.floor(Math.random() * 3);
+            const r = Math.random();
+            let type = r > 0.85 ? 'bridge' : (r > 0.6 ? 'ramp' : 'train');
+            
+            trains.push({ x: lanes[lane] - 35, y: -300, w: 70, h: type === 'bridge' ? 45 : 280, type: type, color: type === 'bridge' ? '#333' : '#777'});
+            
+            // Spawn-Rate berechnen (wird kleiner = schnelleres Spawning)
+            let baseRate = 80;
+            let difficultyBoost = Math.floor(score / 400); 
+            spawnTimer = Math.max(25, baseRate - difficultyBoost); 
+        }
+
+        // Bäume & Schilder
+        if (Math.random() > 0.95) {
+            scenery.push({ x: Math.random() > 0.5 ? 40 : 420, y: -100, type: Math.random() > 0.7 ? 'sign' : 'tree', signType: Math.floor(Math.random() * 3) });
+        }
+
+        // Münzen
+        if (Math.random() > 0.98) {
+            coinPickups.push({ x: lanes[Math.floor(Math.random() * 3)], y: -50, r: 12 });
+        }
+
+        if (isSliding) { slideTimer--; if (slideTimer <= 0) isSliding = false; }
+        scenery.forEach((s, i) => { s.y += gameSpeed; if (s.y > canvas.height) scenery.splice(i, 1); });
+
+        let currentlyOnAnyTrain = false;
+        trains.forEach((t, i) => {
+            t.y += gameSpeed;
+            const pX = player.x, pY = player.y;
+            const hit = pX + 15 > t.x && pX - 15 < t.x + t.w && pY + 15 > t.y && pY - 15 < t.y + t.h;
+            
+            if (hit) {
+                if (t.type === 'ramp' && pY > t.y + t.h - 80) {
+                    currentlyOnAnyTrain = true;
+                } else if (isOnTrain && (t.type === 'train' || t.type === 'ramp')) {
+                    currentlyOnAnyTrain = true;
+                } else if (t.type === 'bridge' && isSliding) {
+                    // Sicher unter der Brücke
+                } else {
+                    gameOver();
+                }
+            }
+            if (t.y > canvas.height) trains.splice(i, 1);
+        });
+        
+        isOnTrain = currentlyOnAnyTrain;
+
+        coinPickups.forEach((c, i) => {
+            c.y += gameSpeed;
+            if (Math.hypot(player.x - c.x, player.y - c.y) < 35) { coins++; playCoinSound(); coinPickups.splice(i, 1); }
+            if (c.y > canvas.height) coinPickups.splice(i, 1);
+        });
+
+        document.getElementById('score').innerText = Math.floor(score / 10);
+        document.getElementById('coins').innerText = coins;
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#555"; ctx.fillRect(100, 0, 300, canvas.height); // Straße
+
+        scenery.forEach(s => {
+            if (s.type === 'tree') {
+                ctx.fillStyle = "#3d2b1f"; ctx.fillRect(s.x, s.y, 15, 30);
+                ctx.fillStyle = "#2d5a27"; ctx.beginPath(); ctx.arc(s.x + 7, s.y - 5, 25, 0, Math.PI*2); ctx.fill();
+            } else {
+                ctx.fillStyle = "#aaa"; ctx.fillRect(s.x + 5, s.y, 5, 40);
+                const colors = ["#ff4444", "#4444ff", "#ffcc00"];
+                ctx.fillStyle = colors[s.signType]; ctx.beginPath();
+                if (s.signType === 0) ctx.arc(s.x + 7, s.y, 15, 0, Math.PI * 2); else ctx.rect(s.x - 8, s.y - 15, 30, 20);
+                ctx.fill(); ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.stroke();
+            }
+        });
+
+        trains.forEach(t => {
+            ctx.fillStyle = t.color; ctx.fillRect(t.x, t.y, t.w, t.h);
+            if (t.type === 'ramp') { ctx.fillStyle = "#c2b280"; ctx.fillRect(t.x, t.y + t.h - 80, t.w, 80); }
+            if (t.type === 'bridge') { 
+                ctx.fillStyle = "yellow"; ctx.fillRect(t.x, t.y + t.h - 5, t.w, 5);
+                ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.fillRect(t.x, t.y, t.w, t.h);
+            }
+        });
+
+        ctx.fillStyle = "#ffd700";
+        coinPickups.forEach(c => { ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI*2); ctx.fill(); });
+        
+        const x = player.x, y = player.y, scale = isOnTrain ? 1.3 : 1.0;
+        ctx.save(); ctx.translate(x, y); ctx.scale(scale, scale);
+        if (isSliding) {
+            ctx.fillStyle = player.shirt; ctx.beginPath(); ctx.ellipse(0, 10, 25, 8, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = player.skin; ctx.beginPath(); ctx.arc(10, 5, 10, 0, Math.PI * 2); ctx.fill();
+        } else {
+            ctx.fillStyle = player.shirt; ctx.beginPath(); ctx.ellipse(0, 5, 20, 12, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = player.skin; ctx.beginPath(); ctx.arc(0, -5, 12, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#442200"; ctx.beginPath(); ctx.arc(0, -7, 10, Math.PI, 0); ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    function gameOver() {
+        if (isGameOver) return;
+        isGameOver = true; playDeathSound();
+        if (musicInterval) clearInterval(musicInterval);
+        startScreen.style.display = 'flex';
+        document.querySelector('#startScreen h1').innerHTML = "BUSTED!<br><small>Final Score: "+Math.floor(score/10)+"</small>";
+    }
+
+    function togglePause() { 
+        isPaused = !isPaused; 
+        if(!isPaused) requestAnimationFrame(gameLoop);
+    }
+
+    function gameLoop() { if (!isGameOver && !isPaused) { update(); draw(); requestAnimationFrame(gameLoop); } }
+
+    // Steuerung
+    window.addEventListener('keydown', (e) => {
+        if (isGameOver || isPaused) return;
+        if ((e.code === 'ArrowLeft' || e.code === 'KeyA') && currentLane > 0) currentLane--;
+        if ((e.code === 'ArrowRight' || e.code === 'KeyD') && currentLane < 2) currentLane++;
+        if (e.code === 'ArrowDown' || e.code === 'KeyS') { isSliding = true; slideTimer = 40; }
+        player.x = lanes[currentLane];
+    });
+
+    let tSX = 0, tSY = 0;
+    window.addEventListener('touchstart', (e) => { tSX = e.touches[0].clientX; tSY = e.touches[0].clientY; });
+    window.addEventListener('touchend', (e) => {
+        let dX = e.changedTouches[0].clientX - tSX;
+        let dY = e.changedTouches[0].clientY - tSY;
+        if (Math.abs(dX) > Math.abs(dY)) {
+            if (dX > 30 && currentLane < 2) currentLane++;
+            if (dX < -30 && currentLane > 0) currentLane--;
+        } else if (dY > 30) { isSliding = true; slideTimer = 40; }
+        player.x = lanes[currentLane];
+    });
+</script>
+</body>
+</html>
